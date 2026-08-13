@@ -1,69 +1,154 @@
-import Image from "next/image";
+"use client";
+
+/**
+ * Phase 1 — Main page.
+ *
+ * Shows a permission prompt, then the webcam feed with landmark overlay.
+ * This is the simplest version: prove hand tracking works before adding
+ * particles, gestures, or audio.
+ *
+ * The page handles three states:
+ *   idle      → "Start" button (user hasn't interacted yet)
+ *   loading   → spinner + status text (webcam + model loading)
+ *   ready     → full-screen webcam with landmark dots
+ *   error     → error message with retry option
+ */
+
+import { useHandTracking, type TrackingStatus } from "@/hooks/useHandTracking";
+import { WebcamView } from "@/components/camera/WebcamView";
 
 export default function Home() {
+  const { videoRef, landmarksRef, status, error, start, stop } =
+    useHandTracking();
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+    <main className="relative flex-1 flex items-center justify-center overflow-hidden">
+      {/* Webcam + landmarks — always mounted but video only plays when started. */}
+      <div
+        className={`absolute inset-0 transition-opacity duration-500 ${
+          status === "ready" ? "opacity-100" : "opacity-0"
+        }`}
+      >
+        <WebcamView videoRef={videoRef} landmarksRef={landmarksRef} />
+      </div>
+
+      {/* Idle state: start button. */}
+      {status === "idle" && <StartScreen onStart={start} />}
+
+      {/* Loading states. */}
+      {(status === "requesting" || status === "loading") && (
+        <LoadingScreen status={status} />
+      )}
+
+      {/* Error state. */}
+      {status === "error" && (
+        <ErrorScreen message={error} onRetry={start} />
+      )}
+
+      {/* Ready state: show landmark count indicator. */}
+      {status === "ready" && (
+        <ReadyOverlay landmarksRef={landmarksRef} onStop={stop} />
+      )}
+    </main>
+  );
+}
+
+/** Landing prompt — explains what the app needs and why. */
+function StartScreen({ onStart }: { onStart: () => void }) {
+  return (
+    <div className="flex flex-col items-center gap-6 p-8 max-w-md text-center z-10">
+      <div className="text-5xl">✋</div>
+      <h1 className="text-3xl font-bold tracking-tight">Motion Canvas</h1>
+      <p className="text-white/60 leading-relaxed">
+        Create art with your hands. This app uses your webcam to track hand
+        movements and turn them into visual art and music.
+      </p>
+      <p className="text-white/40 text-sm">
+        Your camera feed stays on your device — nothing is uploaded.
+      </p>
+      <button
+        onClick={onStart}
+        className="mt-2 px-8 py-3 bg-white text-black font-semibold rounded-full
+                   hover:bg-white/90 active:scale-95 transition-all cursor-pointer"
+      >
+        Enable Camera
+      </button>
     </div>
+  );
+}
+
+/** Loading indicator while webcam + model initialize. */
+function LoadingScreen({ status }: { status: TrackingStatus }) {
+  const message =
+    status === "requesting"
+      ? "Requesting camera access…"
+      : "Loading hand tracking model…";
+
+  return (
+    <div className="flex flex-col items-center gap-4 z-10">
+      {/* Simple CSS spinner */}
+      <div className="w-8 h-8 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+      <p className="text-white/60 text-sm">{message}</p>
+    </div>
+  );
+}
+
+/** Error display with retry. */
+function ErrorScreen({
+  message,
+  onRetry,
+}: {
+  message: string | null;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-4 p-8 max-w-md text-center z-10">
+      <div className="text-4xl">⚠️</div>
+      <p className="text-red-400">{message || "Something went wrong"}</p>
+      <button
+        onClick={onRetry}
+        className="px-6 py-2 bg-white/10 border border-white/20 rounded-full
+                   hover:bg-white/20 transition-colors text-sm cursor-pointer"
+      >
+        Try Again
+      </button>
+    </div>
+  );
+}
+
+/** Minimal overlay shown when tracking is active. */
+function ReadyOverlay({
+  landmarksRef,
+  onStop,
+}: {
+  landmarksRef: React.RefObject<import("@/types/hand").HandTrackingResult | null>;
+  onStop: () => void;
+}) {
+  return (
+    <>
+      {/* Top-left status badge */}
+      <div className="absolute top-4 left-4 z-10 flex items-center gap-2 px-3 py-1.5
+                      bg-black/50 backdrop-blur-sm rounded-full text-xs text-white/70">
+        <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+        Hand tracking active
+      </div>
+
+      {/* Bottom hint */}
+      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10
+                      px-4 py-2 bg-black/50 backdrop-blur-sm rounded-full
+                      text-xs text-white/50">
+        Move your hand in front of the camera — Phase 1: Landmark Visualization
+      </div>
+
+      {/* Stop button */}
+      <button
+        onClick={onStop}
+        className="absolute top-4 right-4 z-10 px-3 py-1.5 bg-black/50
+                   backdrop-blur-sm rounded-full text-xs text-white/70
+                   hover:bg-black/70 transition-colors cursor-pointer"
+      >
+        Stop
+      </button>
+    </>
   );
 }
