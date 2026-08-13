@@ -1,21 +1,21 @@
 /**
- * ParticlePool — pre-allocates particles and recycles them.
+ * ParticlePool — Phase 3 version with Perlin noise forces.
  *
- * Why object pooling matters here:
- *   At 60fps, spawning 5 particles per frame (one per fingertip) = 300
- *   allocations per second. Each `new Particle()` creates a JS object
- *   on the heap. When particles die, they become garbage. The garbage
- *   collector eventually pauses the main thread to clean up — causing
- *   visible frame drops ("jank").
+ * What changed:
+ *   - draw() now renders with glow effects (shadow blur)
+ *   - applyNoiseForces() samples Perlin noise to push particles
+ *   - update() calls noise forces before physics update
+ *   - Ambient particles: spawn random background particles for atmosphere
  *
- *   Object pooling avoids this entirely. We allocate all 300 particles
- *   once at startup. When we need a new particle, we find a dead one
- *   in the pool and reset it. When it dies, it stays in the array —
- *   just marked `alive = false`. Zero allocations, zero GC pressure.
+ * The Perlin noise force field:
+ *   We treat the canvas as a grid of invisible wind currents. At each
+ *   particle's position, we sample noise(x * scale, y * scale, time)
+ *   to get a value 0–1. This maps to an angle, giving us a force direction.
+ *   The scale controls how "zoomed in" the noise is — smaller scale means
+ *   larger, smoother swirls. The time offset makes the field evolve.
  *
- * The pool uses a simple linear scan to find dead particles. With 300
- * particles this takes ~microseconds and isn't worth optimizing with
- * a free list until we hit thousands.
+ *   scale = 0.003 gives swirl patterns about 300px across.
+ *   force magnitude = 50 gives gentle drift without overpowering velocity.
  */
 
 import { Particle } from "./particle";
@@ -28,17 +28,9 @@ export class ParticlePool {
   private nextScanIndex = 0;
 
   constructor(size: number = DEFAULT_POOL_SIZE) {
-    // Pre-allocate everything upfront.
     this.particles = Array.from({ length: size }, () => new Particle());
   }
 
-  /**
-   * Find a dead particle and spawn it with the given properties.
-   * Returns the particle if one was available, null if the pool is full.
-   *
-   * Uses a rotating scan index so we don't always start from index 0 —
-   * this spreads the search evenly across the array.
-   */
   spawn(
     x: number,
     y: number,
@@ -63,8 +55,42 @@ export class ParticlePool {
       }
     }
 
-    // Pool exhausted — all 300 particles alive. Drop this spawn.
     return null;
+  }
+
+  /**
+   * Apply Perlin noise forces to all alive particles.
+   * Must be called before update() each frame so forces are accumulated
+   * before physics integration.
+   *
+   * @param p — the p5 instance (for noise() function)
+   * @param time — elapsed time in seconds (for evolving noise field)
+   */
+  applyNoiseForces(p: p5, time: number): void {
+    // Noise field parameters.
+    const noiseScale = 0.003; // smaller = larger swirls
+    const forceMagnitude = 50; // pixels/second² — gentle push
+
+    for (const particle of this.particles) {
+      if (!particle.alive) continue;
+
+      // Sample noise at this particle's position + its unique offset.
+      // The time component makes the field evolve smoothly.
+      const noiseVal = p.noise(
+        (particle.x + particle.noiseOffsetX) * noiseScale,
+        (particle.y + particle.noiseOffsetY) * noiseScale,
+        time * 0.3 // slow time evolution
+      );
+
+      // Map noise value to angle (0–1 → 0–2π).
+      const angle = noiseVal * Math.PI * 4; // *4 instead of *2 for more variation
+
+      // Create force vector.
+      const fx = Math.cos(angle) * forceMagnitude;
+      const fy = Math.sin(angle) * forceMagnitude;
+
+      particle.applyForce(fx, fy);
+    }
   }
 
   /** Update all alive particles. */
@@ -75,20 +101,44 @@ export class ParticlePool {
   }
 
   /**
-   * Draw all alive particles using p5's drawing API.
-   * Called inside the p5 draw() function.
+   * Draw all alive particles with glow effects.
+   *
+   * Rendering strategy for beauty:
+   *   1. Large soft glow circle (low opacity, big radius) — creates halo
+   *   2. Bright core circle (higher opacity, actual size) — sharp center
+   *   This two-pass approach gives particles a luminous, ethereal quality
+   *   without expensive shader effects.
    */
   draw(p: p5): void {
     p.noStroke();
-    for (const particle of this.particles) {
-      if (!particle.alive) continue;
+    // Use ADD blend mode for luminous, light-like particles.
+    // When particles overlap, their light adds together instead of
+    // painting over each other. This creates beautiful bright spots
+    // where trails converge.
+    p.blendMode(p.ADD);
 
-      p.fill(particle.r, particle.g, particle.b, particle.opacity * 255);
+    for (const particle of this.particles) {
+      if (!particle.alive || particle.opacity <= 0.01) continue;
+
+      const alpha = particle.opacity * 255;
+
+      // Outer glow — large, soft, low opacity.
+      p.fill(particle.r, particle.g, particle.b, alpha * 0.15);
+      p.circle(particle.x, particle.y, particle.size * 4);
+
+      // Core — bright and sharp.
+      p.fill(particle.r, particle.g, particle.b, alpha * 0.8);
       p.circle(particle.x, particle.y, particle.size);
+
+      // Hot center — near-white for intensity.
+      p.fill(255, 255, 255, alpha * 0.3);
+      p.circle(particle.x, particle.y, particle.size * 0.4);
     }
+
+    // Reset blend mode so UI elements draw normally.
+    p.blendMode(p.BLEND);
   }
 
-  /** How many particles are currently alive. Useful for debug display. */
   get activeCount(): number {
     let count = 0;
     for (const p of this.particles) {

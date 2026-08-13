@@ -1,42 +1,13 @@
 "use client";
 
-/**
- * P5Canvas — the main visual layer.
- *
- * How p5.js instance mode works with React:
- *
- *   Global mode (the p5 default) creates global functions like setup()
- *   and draw() on the window object. This conflicts with React because:
- *   - React may mount/unmount components multiple times (StrictMode, navigation)
- *   - Multiple p5 sketches would clobber each other's globals
- *   - There's no clean way to tear down global p5
- *
- *   Instance mode solves this: you pass a "sketch function" to `new p5()`.
- *   The sketch function receives a `p` object with all p5 methods scoped
- *   to that instance. You call `p.createCanvas()`, `p.background()`, etc.
- *   On unmount, `p5Instance.remove()` cleans up the canvas and event listeners.
- *
- * The lerp interpolation pattern:
- *
- *   MediaPipe gives us landmark positions at ~20fps. p5 draws at 60fps.
- *   If we just read the raw landmarks, positions would "teleport" every
- *   3 frames. Instead, we keep two copies:
- *     - `targetPositions`: the latest landmarks from MediaPipe (updates at ~20fps)
- *     - `smoothPositions`: what we actually draw (updates every frame via lerp)
- *
- *   Each frame: smoothPositions = lerp(smoothPositions, targetPositions, 0.3)
- *   This means smooth positions chase the target, moving 30% of the remaining
- *   distance each frame. The result is buttery-smooth movement even though
- *   the source data is choppy.
- */
-
 import { useEffect, useRef } from "react";
 import p5 from "p5";
 import type { HandTrackingResult, Landmark } from "@/types/hand";
 import { FINGERTIP_INDICES } from "@/types/hand";
 import { ParticlePool } from "@/lib/particles/particle-pool";
+import { HandSpeedTracker } from "@/lib/particles/hand-speed";
 
-/** Colors assigned to each fingertip for particle spawning. */
+/** Base colors per fingertip — Phase 3 adds random variation around these. */
 const FINGER_COLORS: [number, number, number][] = [
   [255, 107, 107], // thumb  — red
   [255, 217, 61],  // index  — yellow
@@ -45,8 +16,32 @@ const FINGER_COLORS: [number, number, number][] = [
   [155, 89, 182],  // pinky  — purple
 ];
 
+/** Subtle ambient particle colors — muted, low saturation. */
+const AMBIENT_COLORS: [number, number, number][] = [
+  [60, 60, 80],
+  [50, 70, 60],
+  [70, 50, 70],
+  [60, 70, 50],
+];
+
+/**
+ * Add random color variation to a base color.
+ * Returns a new [r, g, b] with slight shifts for visual richness.
+ */
+function varyColor(
+  r: number,
+  g: number,
+  b: number,
+  amount: number = 30
+): [number, number, number] {
+  return [
+    Math.max(0, Math.min(255, r + (Math.random() - 0.5) * amount)),
+    Math.max(0, Math.min(255, g + (Math.random() - 0.5) * amount)),
+    Math.max(0, Math.min(255, b + (Math.random() - 0.5) * amount)),
+  ];
+}
+
 interface P5CanvasProps {
-  /** Ref to latest hand tracking data — written by useHandTracking. */
   landmarksRef: React.RefObject<HandTrackingResult | null>;
 }
 
@@ -57,109 +52,172 @@ export function P5Canvas({ landmarksRef }: P5CanvasProps) {
   useEffect(() => {
     if (!containerRef.current) return;
 
-    // The sketch function — this is where all p5 logic lives.
-    // It receives `p` (the p5 instance) and defines setup + draw.
     const sketch = (p: p5) => {
       const pool = new ParticlePool(300);
 
-      // Smoothed fingertip positions — lerp targets.
-      // Outer array: one per hand (max 2).
-      // Inner array: one {x, y} per fingertip (5 per hand).
+      // One speed tracker per hand (max 2).
+      const speedTrackers: HandSpeedTracker[] = [
+        new HandSpeedTracker(),
+        new HandSpeedTracker(),
+      ];
+
+      // Smoothed fingertip positions for lerp interpolation.
       let smoothPositions: { x: number; y: number }[][] = [];
 
       let lastFrameTime = 0;
+      let elapsedTime = 0; // total time for noise evolution
 
       p.setup = () => {
         const canvas = p.createCanvas(p.windowWidth, p.windowHeight);
         canvas.style("display", "block");
-        p.background(8, 9, 13); // match page background #08090d
+        p.background(8, 9, 13);
+        p.noiseSeed(42); // consistent noise field across sessions
+        p.noiseDetail(4, 0.5); // 4 octaves, 0.5 falloff — rich detail
         lastFrameTime = p.millis();
       };
 
       p.draw = () => {
-        // Delta time in seconds.
         const now = p.millis();
-        const dt = Math.min((now - lastFrameTime) / 1000, 0.1); // cap at 100ms to avoid spiral
+        const dt = Math.min((now - lastFrameTime) / 1000, 0.1);
         lastFrameTime = now;
+        elapsedTime += dt;
 
-        // Semi-transparent background for trail effect.
-        // Instead of clearing to black each frame, we draw a translucent
-        // black rect. This means previous frame's particles show through
-        // slightly, creating natural motion trails.
+        // Trail fade — lower alpha = longer trails.
+        // Phase 3 uses a very low alpha for dreamy, persistent trails.
+        p.blendMode(p.BLEND);
         p.noStroke();
-        p.fill(8, 9, 13, 30); // low alpha = longer trails
+        p.fill(8, 9, 13, 20);
         p.rect(0, 0, p.width, p.height);
 
-        // Read latest landmarks from the shared ref.
         const result = landmarksRef.current;
 
         if (result && result.hands.length > 0) {
-          // Ensure smoothPositions has the right number of hands.
+          // Ensure smoothPositions arrays exist for each hand.
           while (smoothPositions.length < result.hands.length) {
             smoothPositions.push(
               FINGERTIP_INDICES.map(() => ({ x: p.width / 2, y: p.height / 2 }))
             );
           }
-          // Trim if hands disappeared.
           if (smoothPositions.length > result.hands.length) {
             smoothPositions = smoothPositions.slice(0, result.hands.length);
+            // Reset speed trackers for disappeared hands.
+            for (let i = result.hands.length; i < speedTrackers.length; i++) {
+              speedTrackers[i].reset();
+            }
           }
 
           for (let h = 0; h < result.hands.length; h++) {
             const hand = result.hands[h];
 
+            // Lerp smoothing.
             for (let f = 0; f < FINGERTIP_INDICES.length; f++) {
               const lmIndex = FINGERTIP_INDICES[f];
               const lm: Landmark = hand.landmarks[lmIndex];
 
-              // Target position in pixel coordinates.
               const targetX = lm.x * p.width;
               const targetY = lm.y * p.height;
 
-              // Lerp smooth position toward target.
-              // 0.3 = move 30% of remaining distance each frame.
-              // Higher = snappier but less smooth. Lower = smoother but laggy.
               const smooth = smoothPositions[h][f];
               smooth.x = p.lerp(smooth.x, targetX, 0.3);
               smooth.y = p.lerp(smooth.y, targetY, 0.3);
+            }
 
-              // Spawn a particle at the smoothed fingertip position.
-              const [r, g, b] = FINGER_COLORS[f];
+            // Calculate hand speed from smoothed positions.
+            const speedData = speedTrackers[h].update(smoothPositions[h], dt);
 
-              // Random velocity for spread — gives particles life.
-              const spread = 40;
-              const vx = (Math.random() - 0.5) * spread;
-              const vy = (Math.random() - 0.5) * spread - 20; // slight upward bias
+            // Speed-based spawn parameters.
+            // Clamp speed to a usable range (0–800 px/s is typical hand movement).
+            const avgSpeed = Math.min(speedData.average, 800);
+            const speedNorm = avgSpeed / 800; // 0–1 normalized
 
-              pool.spawn(
-                smooth.x,
-                smooth.y,
-                vx,
-                vy,
-                r, g, b,
-                Math.random() * 4 + 2, // size 2-6
-                Math.random() * 1 + 1   // lifetime 1-2 seconds
-              );
+            // Spawn particles at each fingertip.
+            for (let f = 0; f < FINGERTIP_INDICES.length; f++) {
+              const smooth = smoothPositions[h][f];
+              const fingerSpeed = Math.min(speedData.perFinger[f], 800);
+              const fingerSpeedNorm = fingerSpeed / 800;
+              const direction = speedData.directions[f];
+
+              // How many particles to spawn this frame for this finger.
+              // Slow movement: 1 particle. Fast: up to 3.
+              const spawnCount = Math.floor(1 + fingerSpeedNorm * 2);
+
+              // Spread: how far from the fingertip particles can appear.
+              // Slow = tight (10px), fast = wide (80px).
+              const spread = 10 + fingerSpeedNorm * 70;
+
+              // Initial velocity: particles inherit some hand momentum.
+              // Plus random spread for visual interest.
+              const baseSpeed = 20 + fingerSpeedNorm * 100;
+
+              for (let s = 0; s < spawnCount; s++) {
+                const [cr, cg, cb] = varyColor(...FINGER_COLORS[f], 40);
+
+                // Offset spawn position by spread amount.
+                const offsetX = (Math.random() - 0.5) * spread;
+                const offsetY = (Math.random() - 0.5) * spread;
+
+                // Velocity: partially in hand direction, partially random.
+                const randomAngle = Math.random() * Math.PI * 2;
+                const vx =
+                  Math.cos(direction) * baseSpeed * 0.5 + // hand direction
+                  Math.cos(randomAngle) * baseSpeed * 0.5; // random
+                const vy =
+                  Math.sin(direction) * baseSpeed * 0.5 +
+                  Math.sin(randomAngle) * baseSpeed * 0.5 -
+                  15; // slight upward drift
+
+                // Size: larger when moving fast.
+                const size = 2 + Math.random() * 3 + fingerSpeedNorm * 3;
+
+                // Lifetime: slightly longer when moving slow (concentrated).
+                const lifetime = 1.5 + Math.random() * 1.5 - speedNorm * 0.5;
+
+                pool.spawn(
+                  smooth.x + offsetX,
+                  smooth.y + offsetY,
+                  vx,
+                  vy,
+                  cr, cg, cb,
+                  size,
+                  lifetime
+                );
+              }
             }
           }
         }
 
-        // Update and draw all particles.
+        // Ambient particles — subtle background atmosphere.
+        // Spawn a few random particles each frame regardless of hand presence.
+        if (Math.random() < 0.3) {
+          const color =
+            AMBIENT_COLORS[Math.floor(Math.random() * AMBIENT_COLORS.length)];
+          pool.spawn(
+            Math.random() * p.width,
+            Math.random() * p.height,
+            (Math.random() - 0.5) * 10,
+            (Math.random() - 0.5) * 10,
+            color[0],
+            color[1],
+            color[2],
+            Math.random() * 2 + 1,
+            3 + Math.random() * 3 // long life, slow fade
+          );
+        }
+
+        // Apply Perlin noise forces, then update physics, then draw.
+        pool.applyNoiseForces(p, elapsedTime);
         pool.update(dt);
         pool.draw(p);
       };
 
       p.windowResized = () => {
         p.resizeCanvas(p.windowWidth, p.windowHeight);
-        // Re-fill background to avoid artifacts from the resize.
         p.background(8, 9, 13);
       };
     };
 
-    // Create the p5 instance, mounted to our container div.
     p5Ref.current = new p5(sketch, containerRef.current);
 
-    // Cleanup on unmount — removes the canvas and all event listeners.
     return () => {
       p5Ref.current?.remove();
       p5Ref.current = null;
@@ -170,7 +228,6 @@ export function P5Canvas({ landmarksRef }: P5CanvasProps) {
     <div
       ref={containerRef}
       className="absolute inset-0 w-full h-full"
-      // Prevent the container from affecting layout.
       style={{ zIndex: 0 }}
     />
   );

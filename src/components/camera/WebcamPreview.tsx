@@ -109,7 +109,7 @@ export function WebcamPreview({ videoRef, landmarksRef }: WebcamPreviewProps) {
                     border border-white/10 shadow-2xl shadow-black/50">
       <canvas
         ref={canvasRef}
-        className="w-[240px] h-[180px] block"
+        className="w-60 h-45 block"
       />
     </div>
   );
