@@ -1,21 +1,24 @@
 "use client";
 
 /**
- * Phase 1 — Main page.
+ * Phase 2 — Main page.
  *
- * Shows a permission prompt, then the webcam feed with landmark overlay.
- * This is the simplest version: prove hand tracking works before adding
- * particles, gestures, or audio.
+ * Composites three layers:
+ *   1. P5Canvas (full-screen, z-0) — particles spawning at fingertips
+ *   2. WebcamPreview (bottom-left corner, z-20) — small PiP with landmarks
+ *   3. UI overlays (z-10) — status badges, controls
  *
- * The page handles three states:
- *   idle      → "Start" button (user hasn't interacted yet)
- *   loading   → spinner + status text (webcam + model loading)
- *   ready     → full-screen webcam with landmark dots
- *   error     → error message with retry option
+ * The data flow:
+ *   useHandTracking → writes to landmarksRef
+ *   P5Canvas → reads landmarksRef at 60fps, spawns particles
+ *   WebcamPreview → reads landmarksRef at 60fps, draws small landmark dots
+ *
+ * Both consumers read from the same ref independently.
  */
 
 import { useHandTracking, type TrackingStatus } from "@/hooks/useHandTracking";
-import { WebcamView } from "@/components/camera/WebcamView";
+import { P5Canvas } from "@/components/canvas/P5Canvas";
+import { WebcamPreview } from "@/components/camera/WebcamPreview";
 
 export default function Home() {
   const { videoRef, landmarksRef, status, error, start, stop } =
@@ -23,14 +26,13 @@ export default function Home() {
 
   return (
     <main className="relative flex-1 flex items-center justify-center overflow-hidden">
-      {/* Webcam + landmarks — always mounted but video only plays when started. */}
-      <div
-        className={`absolute inset-0 transition-opacity duration-500 ${
-          status === "ready" ? "opacity-100" : "opacity-0"
-        }`}
-      >
-        <WebcamView videoRef={videoRef} landmarksRef={landmarksRef} />
-      </div>
+      {/* Layer 1: p5.js canvas — always mounted, draws when tracking is ready. */}
+      <P5Canvas landmarksRef={landmarksRef} />
+
+      {/* Layer 2: Webcam preview — only shown when tracking is active. */}
+      {status === "ready" && (
+        <WebcamPreview videoRef={videoRef} landmarksRef={landmarksRef} />
+      )}
 
       {/* Idle state: start button. */}
       {status === "idle" && <StartScreen onStart={start} />}
@@ -45,15 +47,12 @@ export default function Home() {
         <ErrorScreen message={error} onRetry={start} />
       )}
 
-      {/* Ready state: show landmark count indicator. */}
-      {status === "ready" && (
-        <ReadyOverlay landmarksRef={landmarksRef} onStop={stop} />
-      )}
+      {/* Ready state: overlays. */}
+      {status === "ready" && <ReadyOverlay onStop={stop} />}
     </main>
   );
 }
 
-/** Landing prompt — explains what the app needs and why. */
 function StartScreen({ onStart }: { onStart: () => void }) {
   return (
     <div className="flex flex-col items-center gap-6 p-8 max-w-md text-center z-10">
@@ -61,7 +60,7 @@ function StartScreen({ onStart }: { onStart: () => void }) {
       <h1 className="text-3xl font-bold tracking-tight">Motion Canvas</h1>
       <p className="text-white/60 leading-relaxed">
         Create art with your hands. This app uses your webcam to track hand
-        movements and turn them into visual art and music.
+        movements and turn them into particle trails and visual art.
       </p>
       <p className="text-white/40 text-sm">
         Your camera feed stays on your device — nothing is uploaded.
@@ -77,7 +76,6 @@ function StartScreen({ onStart }: { onStart: () => void }) {
   );
 }
 
-/** Loading indicator while webcam + model initialize. */
 function LoadingScreen({ status }: { status: TrackingStatus }) {
   const message =
     status === "requesting"
@@ -86,14 +84,12 @@ function LoadingScreen({ status }: { status: TrackingStatus }) {
 
   return (
     <div className="flex flex-col items-center gap-4 z-10">
-      {/* Simple CSS spinner */}
       <div className="w-8 h-8 border-2 border-white/20 border-t-white rounded-full animate-spin" />
       <p className="text-white/60 text-sm">{message}</p>
     </div>
   );
 }
 
-/** Error display with retry. */
 function ErrorScreen({
   message,
   onRetry,
@@ -116,14 +112,7 @@ function ErrorScreen({
   );
 }
 
-/** Minimal overlay shown when tracking is active. */
-function ReadyOverlay({
-  landmarksRef,
-  onStop,
-}: {
-  landmarksRef: React.RefObject<import("@/types/hand").HandTrackingResult | null>;
-  onStop: () => void;
-}) {
+function ReadyOverlay({ onStop }: { onStop: () => void }) {
   return (
     <>
       {/* Top-left status badge */}
@@ -133,11 +122,11 @@ function ReadyOverlay({
         Hand tracking active
       </div>
 
-      {/* Bottom hint */}
+      {/* Bottom center hint */}
       <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10
                       px-4 py-2 bg-black/50 backdrop-blur-sm rounded-full
                       text-xs text-white/50">
-        Move your hand in front of the camera — Phase 1: Landmark Visualization
+        Move your hand to create particle trails — Phase 2: p5.js Integration
       </div>
 
       {/* Stop button */}

@@ -1,25 +1,15 @@
 "use client";
 
 /**
- * useHandTracking — manages the full webcam → MediaPipe → landmarks pipeline.
+ * useHandTracking — Phase 2 version.
  *
- * What this hook does:
- *   1. Requests webcam permission and opens a video stream
- *   2. Initializes the HandTracker (loads MediaPipe model)
- *   3. Runs detection in a requestAnimationFrame loop
- *   4. Stores the latest HandTrackingResult in a ref (not state!)
+ * Key change from Phase 1: the video element is created programmatically,
+ * not rendered in JSX. This solves the chicken-and-egg problem where
+ * start() needs the video element before the "ready" UI (which contains
+ * the video element) is rendered.
  *
- * Why a ref instead of state?
- *   Detection runs at 15–20fps. If we stored results in React state,
- *   we'd trigger 15–20 React re-renders per second for data that only
- *   the p5.js canvas (which reads from the ref directly) cares about.
- *   The ref gives us a stable, zero-cost bridge between the detection
- *   loop and the render loop.
- *
- * The hook DOES use state for:
- *   - `status`: "idle" | "requesting" | "loading" | "ready" | "error"
- *     This drives UI changes (loading spinners, error messages).
- *   - `error`: string | null — human-readable error message
+ * The programmatic video element is hidden and never displayed directly.
+ * WebcamPreview draws its frames onto a canvas using drawImage().
  */
 
 import { useRef, useState, useEffect, useCallback } from "react";
@@ -34,17 +24,13 @@ export type TrackingStatus =
   | "error";
 
 interface UseHandTrackingReturn {
-  /** The video element ref — attach to a <video> element in your JSX. */
+  /** Hidden video element for MediaPipe + WebcamPreview to read from. */
   videoRef: React.RefObject<HTMLVideoElement | null>;
-  /** Latest detection result — read this from your render loop. */
+  /** Latest detection result — read from your render loop. */
   landmarksRef: React.RefObject<HandTrackingResult | null>;
-  /** Current pipeline status for UI feedback. */
   status: TrackingStatus;
-  /** Error message if status is "error". */
   error: string | null;
-  /** Call this to start the pipeline (webcam + MediaPipe). */
   start: () => Promise<void>;
-  /** Call this to stop everything and release resources. */
   stop: () => void;
 }
 
@@ -58,18 +44,12 @@ export function useHandTracking(): UseHandTrackingReturn {
   const [status, setStatus] = useState<TrackingStatus>("idle");
   const [error, setError] = useState<string | null>(null);
 
-  /**
-   * The detection loop. Runs via requestAnimationFrame but MediaPipe
-   * naturally throttles itself — it won't process faster than it can.
-   * Typically lands at 15–25fps depending on device GPU.
-   */
   const detectLoop = useCallback(() => {
     const video = videoRef.current;
     const tracker = trackerRef.current;
 
     if (!video || !tracker || !tracker.isReady) return;
 
-    // Only detect when the video has actual frame data.
     if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
       const result = tracker.detect(video, performance.now());
       if (result) {
@@ -85,10 +65,6 @@ export function useHandTracking(): UseHandTrackingReturn {
       setStatus("requesting");
       setError(null);
 
-      // Step 1: Get webcam stream.
-      // We request 640x480 — high enough for good landmark detection,
-      // low enough to keep MediaPipe fast. The video isn't displayed
-      // at full quality anyway (it's either a small PiP or hidden).
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: { ideal: 640 },
@@ -99,20 +75,22 @@ export function useHandTracking(): UseHandTrackingReturn {
       });
       streamRef.current = stream;
 
-      // Step 2: Attach stream to video element.
-      const video = videoRef.current;
-      if (!video) throw new Error("Video element not mounted");
-
+      // Create a hidden video element programmatically.
+      // This avoids depending on a JSX-rendered <video> that may
+      // not exist yet when start() is called.
+      const video = document.createElement("video");
+      video.setAttribute("playsinline", "true");
+      video.setAttribute("muted", "true");
+      video.muted = true; // property, not just attribute
       video.srcObject = stream;
       await video.play();
+      videoRef.current = video;
 
-      // Step 3: Initialize MediaPipe (loads model from CDN).
       setStatus("loading");
       const tracker = new HandTracker();
       await tracker.initialize({ numHands: 2 });
       trackerRef.current = tracker;
 
-      // Step 4: Start detection loop.
       setStatus("ready");
       rafIdRef.current = requestAnimationFrame(detectLoop);
     } catch (err) {
@@ -131,23 +109,22 @@ export function useHandTracking(): UseHandTrackingReturn {
   }, [detectLoop]);
 
   const stop = useCallback(() => {
-    // Cancel detection loop.
     if (rafIdRef.current !== null) {
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
     }
 
-    // Destroy MediaPipe tracker.
     trackerRef.current?.destroy();
     trackerRef.current = null;
 
-    // Stop all webcam tracks (turns off the camera light).
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
 
-    // Clear video element.
+    // Clean up the programmatic video element.
     if (videoRef.current) {
+      videoRef.current.pause();
       videoRef.current.srcObject = null;
+      videoRef.current = null;
     }
 
     landmarksRef.current = null;
@@ -155,7 +132,6 @@ export function useHandTracking(): UseHandTrackingReturn {
     setError(null);
   }, []);
 
-  // Cleanup on unmount.
   useEffect(() => {
     return () => stop();
   }, [stop]);
