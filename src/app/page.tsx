@@ -1,21 +1,16 @@
 "use client";
 
 /**
- * Phase 2 — Main page.
+ * Phase 4 — Main page with gesture indicators.
  *
- * Composites three layers:
- *   1. P5Canvas (full-screen, z-0) — particles spawning at fingertips
- *   2. WebcamPreview (bottom-left corner, z-20) — small PiP with landmarks
- *   3. UI overlays (z-10) — status badges, controls
- *
- * The data flow:
- *   useHandTracking → writes to landmarksRef
- *   P5Canvas → reads landmarksRef at 60fps, spawns particles
- *   WebcamPreview → reads landmarksRef at 60fps, draws small landmark dots
- *
- * Both consumers read from the same ref independently.
+ * Added:
+ *   - Gesture state display (bottom-left, above webcam preview)
+ *   - Palette name indicator (top center, flashes on change)
+ *   - Freeze indicator (overlay when canvas is frozen)
+ *   - Gesture hints (shows which gestures are available)
  */
 
+import { useState, useCallback } from "react";
 import { useHandTracking, type TrackingStatus } from "@/hooks/useHandTracking";
 import { P5Canvas } from "@/components/canvas/P5Canvas";
 import { WebcamPreview } from "@/components/camera/WebcamPreview";
@@ -24,32 +19,123 @@ export default function Home() {
   const { videoRef, landmarksRef, status, error, start, stop } =
     useHandTracking();
 
+  const [currentGesture, setCurrentGesture] = useState("none");
+  const [paletteName, setPaletteName] = useState("Neon");
+  const [frozen, setFrozen] = useState(false);
+  const [showPaletteFlash, setShowPaletteFlash] = useState(false);
+
+  const handleGestureChange = useCallback((gesture: string) => {
+    setCurrentGesture(gesture);
+  }, []);
+
+  const handlePaletteChange = useCallback((name: string) => {
+    setPaletteName(name);
+    setShowPaletteFlash(true);
+    setTimeout(() => setShowPaletteFlash(false), 1200);
+  }, []);
+
+  const handleFreezeChange = useCallback((isFrozen: boolean) => {
+    setFrozen(isFrozen);
+  }, []);
+
   return (
     <main className="relative flex-1 flex items-center justify-center overflow-hidden">
-      {/* Layer 1: p5.js canvas — always mounted, draws when tracking is ready. */}
-      <P5Canvas landmarksRef={landmarksRef} />
+      {/* Layer 1: p5.js canvas */}
+      <P5Canvas
+        landmarksRef={landmarksRef}
+        onGestureChange={handleGestureChange}
+        onPaletteChange={handlePaletteChange}
+        onFreezeChange={handleFreezeChange}
+      />
 
-      {/* Layer 2: Webcam preview — only shown when tracking is active. */}
+      {/* Layer 2: Webcam preview */}
       {status === "ready" && (
         <WebcamPreview videoRef={videoRef} landmarksRef={landmarksRef} />
       )}
 
-      {/* Idle state: start button. */}
+      {/* Idle state */}
       {status === "idle" && <StartScreen onStart={start} />}
 
-      {/* Loading states. */}
+      {/* Loading states */}
       {(status === "requesting" || status === "loading") && (
         <LoadingScreen status={status} />
       )}
 
-      {/* Error state. */}
+      {/* Error state */}
       {status === "error" && (
         <ErrorScreen message={error} onRetry={start} />
       )}
 
-      {/* Ready state: overlays. */}
-      {status === "ready" && <ReadyOverlay onStop={stop} />}
+      {/* Ready state overlays */}
+      {status === "ready" && (
+        <>
+          <ReadyOverlay onStop={stop} />
+
+          {/* Gesture indicator */}
+          <GestureIndicator gesture={currentGesture} />
+
+          {/* Palette flash */}
+          {showPaletteFlash && (
+            <div className="absolute top-16 left-1/2 -translate-x-1/2 z-20
+                            px-4 py-2 bg-white/10 backdrop-blur-md rounded-full
+                            text-sm text-white/90 font-medium
+                            animate-[fadeInOut_1.2s_ease-in-out]">
+              {paletteName}
+            </div>
+          )}
+
+          {/* Freeze indicator */}
+          {frozen && (
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2
+                            z-20 px-6 py-3 bg-black/60 backdrop-blur-md rounded-xl
+                            text-white/80 text-lg font-medium pointer-events-none">
+              ❄ Frozen — make a fist to unfreeze
+            </div>
+          )}
+
+          {/* Gesture hints */}
+          <GestureHints />
+        </>
+      )}
     </main>
+  );
+}
+
+// ─── Sub-components ────────────────────────────────────────────────
+
+function GestureIndicator({ gesture }: { gesture: string }) {
+  if (gesture === "none") return null;
+
+  const labels: Record<string, { icon: string; label: string }> = {
+    pinch: { icon: "🤏", label: "Pinch — Color Cycle" },
+    fist: { icon: "✊", label: "Fist — Freeze Toggle" },
+    spread: { icon: "🖐", label: "Spread" },
+    point: { icon: "☝️", label: "Point — Precision Mode" },
+  };
+
+  const info = labels[gesture];
+  if (!info) return null;
+
+  return (
+    <div className="absolute bottom-52 left-4 z-20 flex items-center gap-2
+                    px-3 py-1.5 bg-black/50 backdrop-blur-sm rounded-full
+                    text-xs text-white/80">
+      <span>{info.icon}</span>
+      <span>{info.label}</span>
+    </div>
+  );
+}
+
+function GestureHints() {
+  return (
+    <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10
+                    flex items-center gap-4 px-4 py-2 bg-black/40
+                    backdrop-blur-sm rounded-full text-[10px] text-white/40">
+      <span>🤏 Color</span>
+      <span>✊ Freeze</span>
+      <span>☝️ Precision</span>
+      <span>🖐 Flash</span>
+    </div>
   );
 }
 
@@ -115,21 +201,18 @@ function ErrorScreen({
 function ReadyOverlay({ onStop }: { onStop: () => void }) {
   return (
     <>
-      {/* Top-left status badge */}
-      <div className="absolute top-4 left-4 z-10 flex items-center gap-2 px-3 py-1.5
+      <div className="absolute top-10 left-4 z-10 flex items-center gap-2 px-3 py-1.5
                       bg-black/50 backdrop-blur-sm rounded-full text-xs text-white/70">
         <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
         Hand tracking active
       </div>
 
-      {/* Bottom center hint */}
       <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10
                       px-4 py-2 bg-black/50 backdrop-blur-sm rounded-full
                       text-xs text-white/50">
-        Move your hand to create particle trails — Phase 2: p5.js Integration
+        Phase 4: Gesture Detection — try pinch, fist, point, or spread
       </div>
 
-      {/* Stop button */}
       <button
         onClick={onStop}
         className="absolute top-4 right-4 z-10 px-3 py-1.5 bg-black/50
