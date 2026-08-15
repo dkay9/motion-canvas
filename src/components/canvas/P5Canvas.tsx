@@ -1,13 +1,26 @@
 "use client";
 
+/**
+ * P5Canvas — Phase 5 version with visual modes.
+ *
+ * Changes from Phase 4:
+ *   - Mode system: each mode is a function called per-hand per-frame
+ *   - Spread gesture now cycles modes instead of flash
+ *   - Free draw mode skips Perlin noise forces (marks should stay put)
+ *   - Force field mode applies its own gravity forces
+ *   - currentMode tracked in stateRef, exposed via callback
+ */
+
 import { useEffect, useRef } from "react";
 import p5 from "p5";
 import type { HandTrackingResult, Landmark } from "@/types/hand";
-import { FINGERTIP_INDICES, PALETTES, LANDMARK } from "@/types/hand";
+import { FINGERTIP_INDICES, PALETTES } from "@/types/hand";
 import { ParticlePool } from "@/lib/particles/particle-pool";
 import { HandSpeedTracker } from "@/lib/particles/hand-speed";
 import { detectGesture } from "@/lib/gestures/gesture-detector";
 import { GestureStateMachine } from "@/lib/gestures/gesture-state";
+import { MODES, MODE_ORDER, MODE_LABELS } from "@/lib/particles/modes";
+import type { VisualMode, ModeContext } from "@/lib/particles/modes";
 
 const AMBIENT_COLORS: [number, number, number][] = [
   [60, 60, 80],
@@ -16,24 +29,14 @@ const AMBIENT_COLORS: [number, number, number][] = [
   [60, 70, 50],
 ];
 
-function varyColor(
-  r: number,
-  g: number,
-  b: number,
-  amount: number = 30
-): [number, number, number] {
-  return [
-    Math.max(0, Math.min(255, r + (Math.random() - 0.5) * amount)),
-    Math.max(0, Math.min(255, g + (Math.random() - 0.5) * amount)),
-    Math.max(0, Math.min(255, b + (Math.random() - 0.5) * amount)),
-  ];
-}
-
 interface P5CanvasProps {
   landmarksRef: React.RefObject<HandTrackingResult | null>;
   onGestureChange?: (gesture: string) => void;
   onPaletteChange?: (name: string) => void;
   onFreezeChange?: (frozen: boolean) => void;
+  onModeChange?: (mode: VisualMode, label: string) => void;
+  /** Externally set mode (from UI selector). */
+  externalMode?: VisualMode;
 }
 
 export function P5Canvas({
@@ -41,6 +44,8 @@ export function P5Canvas({
   onGestureChange,
   onPaletteChange,
   onFreezeChange,
+  onModeChange,
+  externalMode,
 }: P5CanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const p5Ref = useRef<p5 | null>(null);
@@ -49,11 +54,27 @@ export function P5Canvas({
     paletteIndex: 0,
     frozen: false,
     pointMode: false,
-    spreadFlash: 0,
+    modeIndex: 0,
+    currentMode: "trails" as VisualMode,
   });
 
-  const callbacksRef = useRef({ onGestureChange, onPaletteChange, onFreezeChange });
-  callbacksRef.current = { onGestureChange, onPaletteChange, onFreezeChange };
+  const callbacksRef = useRef({
+    onGestureChange, onPaletteChange, onFreezeChange, onModeChange,
+  });
+  callbacksRef.current = {
+    onGestureChange, onPaletteChange, onFreezeChange, onModeChange,
+  };
+
+  // Handle external mode changes from UI.
+  useEffect(() => {
+    if (externalMode && externalMode !== stateRef.current.currentMode) {
+      const idx = MODE_ORDER.indexOf(externalMode);
+      if (idx !== -1) {
+        stateRef.current.modeIndex = idx;
+        stateRef.current.currentMode = externalMode;
+      }
+    }
+  }, [externalMode]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -64,6 +85,16 @@ export function P5Canvas({
         new HandSpeedTracker(),
         new HandSpeedTracker(),
       ];
+
+      function cycleMode(): void {
+        const state = stateRef.current;
+        state.modeIndex = (state.modeIndex + 1) % MODE_ORDER.length;
+        state.currentMode = MODE_ORDER[state.modeIndex];
+        callbacksRef.current.onModeChange?.(
+          state.currentMode,
+          MODE_LABELS[state.currentMode]
+        );
+      }
 
       const gestureStates: GestureStateMachine[] = [
         new GestureStateMachine({
@@ -80,7 +111,7 @@ export function P5Canvas({
             callbacksRef.current.onFreezeChange?.(state.frozen);
           },
           onSpread: () => {
-            stateRef.current.spreadFlash = 0.4;
+            cycleMode();
           },
           onPoint: () => {
             stateRef.current.pointMode = true;
@@ -106,7 +137,7 @@ export function P5Canvas({
             callbacksRef.current.onFreezeChange?.(state.frozen);
           },
           onSpread: () => {
-            stateRef.current.spreadFlash = 0.4;
+            cycleMode();
           },
         }),
       ];
@@ -132,30 +163,17 @@ export function P5Canvas({
 
         const state = stateRef.current;
 
-        // Spread flash effect.
-        if (state.spreadFlash > 0) {
-          state.spreadFlash -= dt;
-          const flashAlpha = Math.max(0, state.spreadFlash / 0.4) * 40;
-          p.blendMode(p.BLEND);
-          p.noStroke();
-          p.fill(255, 255, 255, flashAlpha);
-          p.rect(0, 0, p.width, p.height);
-        }
-
-        // Trail fade.
+        // Trail fade — free draw uses much slower fade for persistent marks.
         p.blendMode(p.BLEND);
         p.noStroke();
-        p.fill(8, 9, 13, 20);
+        const fadeAlpha = state.currentMode === "freeDraw" ? 5 : 20;
+        p.fill(8, 9, 13, fadeAlpha);
         p.rect(0, 0, p.width, p.height);
 
         const result = landmarksRef.current;
         const currentPalette = PALETTES[state.paletteIndex];
 
-        // ────────────────────────────────────────────────────────
-        // GESTURE DETECTION — runs ALWAYS, even when frozen.
-        // This is separated from particle spawning so that
-        // fist-to-unfreeze works while the canvas is frozen.
-        // ────────────────────────────────────────────────────────
+        // Gesture detection — always runs.
         if (result && result.hands.length > 0) {
           for (let h = 0; h < result.hands.length; h++) {
             const gestureResult = detectGesture(result.hands[h].landmarks);
@@ -163,14 +181,9 @@ export function P5Canvas({
           }
         }
 
-        // ────────────────────────────────────────────────────────
-        // FREEZE CHECK — if frozen, draw existing particles but
-        // skip spawning, physics, and noise forces.
-        // ────────────────────────────────────────────────────────
+        // Freeze check.
         if (state.frozen) {
           pool.draw(p);
-
-          // Subtle frozen overlay.
           p.blendMode(p.BLEND);
           p.noStroke();
           p.fill(255, 255, 255, 15);
@@ -178,11 +191,8 @@ export function P5Canvas({
           return;
         }
 
-        // ────────────────────────────────────────────────────────
-        // PARTICLE SPAWNING — only runs when NOT frozen.
-        // ────────────────────────────────────────────────────────
+        // Particle spawning via current mode.
         if (result && result.hands.length > 0) {
-          // Ensure smoothPositions arrays exist for each hand.
           while (smoothPositions.length < result.hands.length) {
             smoothPositions.push(
               FINGERTIP_INDICES.map(() => ({ x: p.width / 2, y: p.height / 2 }))
@@ -211,21 +221,19 @@ export function P5Canvas({
 
             const speedData = speedTrackers[h].update(smoothPositions[h], dt);
 
-            // Point mode: single fine line from index finger only.
+            // Point mode overrides current mode — precision drawing.
             if (state.pointMode) {
               const indexSmooth = smoothPositions[h][1];
-              const [cr, cg, cb] = varyColor(
-                ...currentPalette.colors[1],
-                15
-              );
-
+              const [cr, cg, cb] = currentPalette.colors[1];
               for (let s = 0; s < 2; s++) {
                 pool.spawn(
                   indexSmooth.x + (Math.random() - 0.5) * 3,
                   indexSmooth.y + (Math.random() - 0.5) * 3,
                   (Math.random() - 0.5) * 5,
                   (Math.random() - 0.5) * 5 - 5,
-                  cr, cg, cb,
+                  cr + (Math.random() - 0.5) * 15,
+                  cg + (Math.random() - 0.5) * 15,
+                  cb + (Math.random() - 0.5) * 15,
                   1.5 + Math.random(),
                   2 + Math.random()
                 );
@@ -233,56 +241,26 @@ export function P5Canvas({
               continue;
             }
 
-            // Normal multi-finger spawning.
-            const avgSpeed = Math.min(speedData.average, 800);
-            const speedNorm = avgSpeed / 800;
+            // Call current mode's spawn function.
+            const modeCtx: ModeContext = {
+              p,
+              pool,
+              fingerPositions: smoothPositions[h],
+              landmarks: hand.landmarks,
+              speedData,
+              dt,
+              elapsedTime,
+              colors: currentPalette.colors,
+              canvasWidth: p.width,
+              canvasHeight: p.height,
+            };
 
-            for (let f = 0; f < FINGERTIP_INDICES.length; f++) {
-              const smooth = smoothPositions[h][f];
-              const fingerSpeed = Math.min(speedData.perFinger[f], 800);
-              const fingerSpeedNorm = fingerSpeed / 800;
-              const direction = speedData.directions[f];
-
-              const spawnCount = Math.floor(1 + fingerSpeedNorm * 2);
-              const spread = 10 + fingerSpeedNorm * 70;
-              const baseSpeed = 20 + fingerSpeedNorm * 100;
-
-              for (let s = 0; s < spawnCount; s++) {
-                const [cr, cg, cb] = varyColor(
-                  ...currentPalette.colors[f],
-                  40
-                );
-
-                const offsetX = (Math.random() - 0.5) * spread;
-                const offsetY = (Math.random() - 0.5) * spread;
-
-                const randomAngle = Math.random() * Math.PI * 2;
-                const vx =
-                  Math.cos(direction) * baseSpeed * 0.5 +
-                  Math.cos(randomAngle) * baseSpeed * 0.5;
-                const vy =
-                  Math.sin(direction) * baseSpeed * 0.5 +
-                  Math.sin(randomAngle) * baseSpeed * 0.5 -
-                  15;
-
-                const size = 2 + Math.random() * 3 + fingerSpeedNorm * 3;
-                const lifetime = 1.5 + Math.random() * 1.5 - speedNorm * 0.5;
-
-                pool.spawn(
-                  smooth.x + offsetX,
-                  smooth.y + offsetY,
-                  vx, vy,
-                  cr, cg, cb,
-                  size,
-                  lifetime
-                );
-              }
-            }
+            MODES[state.currentMode](modeCtx);
           }
         }
 
-        // Ambient particles.
-        if (Math.random() < 0.3) {
+        // Ambient particles (skip in free draw — it's about deliberate marks).
+        if (state.currentMode !== "freeDraw" && Math.random() < 0.3) {
           const color =
             AMBIENT_COLORS[Math.floor(Math.random() * AMBIENT_COLORS.length)];
           pool.spawn(
@@ -296,7 +274,11 @@ export function P5Canvas({
           );
         }
 
-        pool.applyNoiseForces(p, elapsedTime);
+        // Perlin noise forces (skip in free draw — marks should stay put).
+        if (state.currentMode !== "freeDraw") {
+          pool.applyNoiseForces(p, elapsedTime);
+        }
+
         pool.update(dt);
         pool.draw(p);
       };

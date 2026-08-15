@@ -1,19 +1,21 @@
 "use client";
 
 /**
- * Phase 4 — Main page with gesture indicators.
+ * Phase 5 — Main page with mode selector.
  *
  * Added:
- *   - Gesture state display (bottom-left, above webcam preview)
- *   - Palette name indicator (top center, flashes on change)
- *   - Freeze indicator (overlay when canvas is frozen)
- *   - Gesture hints (shows which gestures are available)
+ *   - Mode selector bar at the bottom
+ *   - Mode change flash indicator
+ *   - Spread gesture hint updated to show "Mode"
+ *   - External mode setting from UI buttons
  */
 
 import { useState, useCallback } from "react";
 import { useHandTracking, type TrackingStatus } from "@/hooks/useHandTracking";
 import { P5Canvas } from "@/components/canvas/P5Canvas";
 import { WebcamPreview } from "@/components/camera/WebcamPreview";
+import { MODE_ORDER, MODE_LABELS } from "@/lib/particles/modes";
+import type { VisualMode } from "@/lib/particles/modes";
 
 export default function Home() {
   const { videoRef, landmarksRef, status, error, start, stop } =
@@ -23,6 +25,12 @@ export default function Home() {
   const [paletteName, setPaletteName] = useState("Neon");
   const [frozen, setFrozen] = useState(false);
   const [showPaletteFlash, setShowPaletteFlash] = useState(false);
+  const [currentMode, setCurrentMode] = useState<VisualMode>("trails");
+  const [modeLabel, setModeLabel] = useState("Trails");
+  const [showModeFlash, setShowModeFlash] = useState(false);
+  const [externalMode, setExternalMode] = useState<VisualMode | undefined>(
+    undefined
+  );
 
   const handleGestureChange = useCallback((gesture: string) => {
     setCurrentGesture(gesture);
@@ -38,43 +46,54 @@ export default function Home() {
     setFrozen(isFrozen);
   }, []);
 
+  const handleModeChange = useCallback((mode: VisualMode, label: string) => {
+    setCurrentMode(mode);
+    setModeLabel(label);
+    setShowModeFlash(true);
+    setTimeout(() => setShowModeFlash(false), 1200);
+  }, []);
+
+  const handleModeSelect = useCallback((mode: VisualMode) => {
+    setExternalMode(mode);
+    setCurrentMode(mode);
+    setModeLabel(MODE_LABELS[mode]);
+    setShowModeFlash(true);
+    setTimeout(() => {
+      setShowModeFlash(false);
+      setExternalMode(undefined); // clear so subsequent gesture changes work
+    }, 1200);
+  }, []);
+
   return (
     <main className="relative flex-1 flex items-center justify-center overflow-hidden">
-      {/* Layer 1: p5.js canvas */}
       <P5Canvas
         landmarksRef={landmarksRef}
         onGestureChange={handleGestureChange}
         onPaletteChange={handlePaletteChange}
         onFreezeChange={handleFreezeChange}
+        onModeChange={handleModeChange}
+        externalMode={externalMode}
       />
 
-      {/* Layer 2: Webcam preview */}
       {status === "ready" && (
         <WebcamPreview videoRef={videoRef} landmarksRef={landmarksRef} />
       )}
 
-      {/* Idle state */}
       {status === "idle" && <StartScreen onStart={start} />}
 
-      {/* Loading states */}
       {(status === "requesting" || status === "loading") && (
         <LoadingScreen status={status} />
       )}
 
-      {/* Error state */}
       {status === "error" && (
         <ErrorScreen message={error} onRetry={start} />
       )}
 
-      {/* Ready state overlays */}
       {status === "ready" && (
         <>
           <ReadyOverlay onStop={stop} />
-
-          {/* Gesture indicator */}
           <GestureIndicator gesture={currentGesture} />
 
-          {/* Palette flash */}
           {showPaletteFlash && (
             <div className="absolute top-16 left-1/2 -translate-x-1/2 z-20
                             px-4 py-2 bg-white/10 backdrop-blur-md rounded-full
@@ -84,7 +103,15 @@ export default function Home() {
             </div>
           )}
 
-          {/* Freeze indicator */}
+          {showModeFlash && (
+            <div className="absolute top-28 left-1/2 -translate-x-1/2 z-20
+                            px-4 py-2 bg-white/10 backdrop-blur-md rounded-full
+                            text-sm text-white/90 font-medium
+                            animate-[fadeInOut_1.2s_ease-in-out]">
+              {modeLabel}
+            </div>
+          )}
+
           {frozen && (
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2
                             z-20 px-6 py-3 bg-black/60 backdrop-blur-md rounded-xl
@@ -93,8 +120,12 @@ export default function Home() {
             </div>
           )}
 
-          {/* Gesture hints */}
           <GestureHints />
+
+          <ModeSelector
+            currentMode={currentMode}
+            onSelect={handleModeSelect}
+          />
         </>
       )}
     </main>
@@ -103,13 +134,41 @@ export default function Home() {
 
 // ─── Sub-components ────────────────────────────────────────────────
 
+function ModeSelector({
+  currentMode,
+  onSelect,
+}: {
+  currentMode: VisualMode;
+  onSelect: (mode: VisualMode) => void;
+}) {
+  return (
+    <div className="absolute bottom-14 left-1/2 -translate-x-1/2 z-20
+                    flex items-center gap-1 px-2 py-1.5 bg-black/50
+                    backdrop-blur-md rounded-full">
+      {MODE_ORDER.map((mode) => (
+        <button
+          key={mode}
+          onClick={() => onSelect(mode)}
+          className={`px-3 py-1 rounded-full text-xs transition-all cursor-pointer ${
+            currentMode === mode
+              ? "bg-white/20 text-white font-medium"
+              : "text-white/50 hover:text-white/70 hover:bg-white/5"
+          }`}
+        >
+          {MODE_LABELS[mode]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function GestureIndicator({ gesture }: { gesture: string }) {
   if (gesture === "none") return null;
 
   const labels: Record<string, { icon: string; label: string }> = {
     pinch: { icon: "🤏", label: "Pinch — Color Cycle" },
     fist: { icon: "✊", label: "Fist — Freeze Toggle" },
-    spread: { icon: "🖐", label: "Spread" },
+    spread: { icon: "🖐", label: "Spread — Mode Cycle" },
     point: { icon: "☝️", label: "Point — Precision Mode" },
   };
 
@@ -134,7 +193,7 @@ function GestureHints() {
       <span>🤏 Color</span>
       <span>✊ Freeze</span>
       <span>☝️ Precision</span>
-      <span>🖐 Flash</span>
+      <span>🖐 Mode</span>
     </div>
   );
 }
@@ -205,12 +264,6 @@ function ReadyOverlay({ onStop }: { onStop: () => void }) {
                       bg-black/50 backdrop-blur-sm rounded-full text-xs text-white/70">
         <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
         Hand tracking active
-      </div>
-
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10
-                      px-4 py-2 bg-black/50 backdrop-blur-sm rounded-full
-                      text-xs text-white/50">
-        Phase 4: Gesture Detection — try pinch, fist, point, or spread
       </div>
 
       <button
