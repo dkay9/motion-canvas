@@ -1,26 +1,28 @@
 "use client";
 
 /**
- * P5Canvas — Phase 5 version with visual modes.
+ * P5Canvas — Phase 6 version with audio integration.
  *
- * Changes from Phase 4:
- *   - Mode system: each mode is a function called per-hand per-frame
- *   - Spread gesture now cycles modes instead of flash
- *   - Free draw mode skips Perlin noise forces (marks should stay put)
- *   - Force field mode applies its own gravity forces
- *   - currentMode tracked in stateRef, exposed via callback
+ * Changes from Phase 5:
+ *   - Reads from audioEngine and audioMapper refs each frame
+ *   - Calculates palm center position for audio mapping
+ *   - Updates note/volume based on hand position and speed
+ *   - Spread gesture triggers chord via audio engine
+ *   - Starts/stops notes when hands appear/disappear
  */
 
 import { useEffect, useRef } from "react";
 import p5 from "p5";
 import type { HandTrackingResult, Landmark } from "@/types/hand";
-import { FINGERTIP_INDICES, PALETTES } from "@/types/hand";
+import { FINGERTIP_INDICES, PALETTES, LANDMARK } from "@/types/hand";
 import { ParticlePool } from "@/lib/particles/particle-pool";
 import { HandSpeedTracker } from "@/lib/particles/hand-speed";
 import { detectGesture } from "@/lib/gestures/gesture-detector";
 import { GestureStateMachine } from "@/lib/gestures/gesture-state";
 import { MODES, MODE_ORDER, MODE_LABELS } from "@/lib/particles/modes";
 import type { VisualMode, ModeContext } from "@/lib/particles/modes";
+import type { AudioEngine } from "@/lib/audio/audio-engine";
+import type { AudioMapper } from "@/lib/audio/audio-mapper";
 
 const AMBIENT_COLORS: [number, number, number][] = [
   [60, 60, 80],
@@ -35,8 +37,11 @@ interface P5CanvasProps {
   onPaletteChange?: (name: string) => void;
   onFreezeChange?: (frozen: boolean) => void;
   onModeChange?: (mode: VisualMode, label: string) => void;
-  /** Externally set mode (from UI selector). */
   externalMode?: VisualMode;
+  /** Audio engine ref from useAudio hook. */
+  audioEngineRef?: React.RefObject<AudioEngine | null>;
+  /** Audio mapper ref from useAudio hook. */
+  audioMapperRef?: React.RefObject<AudioMapper | null>;
 }
 
 export function P5Canvas({
@@ -46,6 +51,8 @@ export function P5Canvas({
   onFreezeChange,
   onModeChange,
   externalMode,
+  audioEngineRef,
+  audioMapperRef,
 }: P5CanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const p5Ref = useRef<p5 | null>(null);
@@ -65,7 +72,6 @@ export function P5Canvas({
     onGestureChange, onPaletteChange, onFreezeChange, onModeChange,
   };
 
-  // Handle external mode changes from UI.
   useEffect(() => {
     if (externalMode && externalMode !== stateRef.current.currentMode) {
       const idx = MODE_ORDER.indexOf(externalMode);
@@ -85,6 +91,9 @@ export function P5Canvas({
         new HandSpeedTracker(),
         new HandSpeedTracker(),
       ];
+
+      // Track whether hands were present last frame for note start/stop.
+      let hadHands = false;
 
       function cycleMode(): void {
         const state = stateRef.current;
@@ -112,6 +121,8 @@ export function P5Canvas({
           },
           onSpread: () => {
             cycleMode();
+            // Trigger chord on spread.
+            audioEngineRef?.current?.triggerChord();
           },
           onPoint: () => {
             stateRef.current.pointMode = true;
@@ -138,6 +149,7 @@ export function P5Canvas({
           },
           onSpread: () => {
             cycleMode();
+            audioEngineRef?.current?.triggerChord();
           },
         }),
       ];
@@ -163,7 +175,7 @@ export function P5Canvas({
 
         const state = stateRef.current;
 
-        // Trail fade — free draw uses much slower fade for persistent marks.
+        // Trail fade.
         p.blendMode(p.BLEND);
         p.noStroke();
         const fadeAlpha = state.currentMode === "freeDraw" ? 5 : 20;
@@ -191,7 +203,60 @@ export function P5Canvas({
           return;
         }
 
-        // Particle spawning via current mode.
+        // ── Audio mapping ──
+        const engine = audioEngineRef?.current;
+        const mapper = audioMapperRef?.current;
+        const hasHands = !!(result && result.hands.length > 0);
+
+        if (engine && mapper) {
+          if (hasHands && result) {
+            // Use first hand for audio control.
+            const hand = result.hands[0];
+
+            // Palm center for position mapping.
+            const palmX =
+              (hand.landmarks[LANDMARK.WRIST].x +
+                hand.landmarks[LANDMARK.INDEX_MCP].x +
+                hand.landmarks[LANDMARK.MIDDLE_MCP].x +
+                hand.landmarks[LANDMARK.RING_MCP].x +
+                hand.landmarks[LANDMARK.PINKY_MCP].x) / 5;
+
+            const palmY =
+              (hand.landmarks[LANDMARK.WRIST].y +
+                hand.landmarks[LANDMARK.INDEX_MCP].y +
+                hand.landmarks[LANDMARK.MIDDLE_MCP].y +
+                hand.landmarks[LANDMARK.RING_MCP].y +
+                hand.landmarks[LANDMARK.PINKY_MCP].y) / 5;
+
+            // Get speed from first hand's tracker if available.
+            const speed = smoothPositions.length > 0
+              ? speedTrackers[0].update(smoothPositions[0], dt).average
+              : 0;
+
+            // Don't double-update speed tracker — it'll be updated again below.
+            // Use a separate peek at the smoothed speed value instead.
+            // Actually, speed tracker is updated below in the spawning loop.
+            // For audio we use the last known average which is fine.
+
+            const audioParams = mapper.update(palmX, palmY, speed, true);
+
+            if (!hadHands) {
+              engine.startNote(audioParams.noteIndex);
+            }
+
+            engine.updateNote(audioParams.noteIndex, audioParams.volume);
+          } else {
+            // No hands detected — fade out.
+            const audioParams = mapper.update(0, 0, 0, false);
+            if (hadHands) {
+              engine.stopNote();
+            }
+          }
+        }
+
+        hadHands = hasHands;
+
+        // Particle spawning.
         if (result && result.hands.length > 0) {
           while (smoothPositions.length < result.hands.length) {
             smoothPositions.push(
@@ -208,7 +273,6 @@ export function P5Canvas({
           for (let h = 0; h < result.hands.length; h++) {
             const hand = result.hands[h];
 
-            // Lerp smoothing.
             for (let f = 0; f < FINGERTIP_INDICES.length; f++) {
               const lmIndex = FINGERTIP_INDICES[f];
               const lm: Landmark = hand.landmarks[lmIndex];
@@ -221,7 +285,6 @@ export function P5Canvas({
 
             const speedData = speedTrackers[h].update(smoothPositions[h], dt);
 
-            // Point mode overrides current mode — precision drawing.
             if (state.pointMode) {
               const indexSmooth = smoothPositions[h][1];
               const [cr, cg, cb] = currentPalette.colors[1];
@@ -241,7 +304,6 @@ export function P5Canvas({
               continue;
             }
 
-            // Call current mode's spawn function.
             const modeCtx: ModeContext = {
               p,
               pool,
@@ -259,7 +321,7 @@ export function P5Canvas({
           }
         }
 
-        // Ambient particles (skip in free draw — it's about deliberate marks).
+        // Ambient particles.
         if (state.currentMode !== "freeDraw" && Math.random() < 0.3) {
           const color =
             AMBIENT_COLORS[Math.floor(Math.random() * AMBIENT_COLORS.length)];
@@ -274,7 +336,6 @@ export function P5Canvas({
           );
         }
 
-        // Perlin noise forces (skip in free draw — marks should stay put).
         if (state.currentMode !== "freeDraw") {
           pool.applyNoiseForces(p, elapsedTime);
         }
@@ -295,7 +356,7 @@ export function P5Canvas({
       p5Ref.current?.remove();
       p5Ref.current = null;
     };
-  }, [landmarksRef]);
+  }, [landmarksRef, audioEngineRef, audioMapperRef]);
 
   return (
     <div

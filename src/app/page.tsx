@@ -1,17 +1,17 @@
 "use client";
 
 /**
- * Phase 5 — Main page with mode selector.
+ * Phase 6 — Main page with audio controls.
  *
  * Added:
- *   - Mode selector bar at the bottom
- *   - Mode change flash indicator
- *   - Spread gesture hint updated to show "Mode"
- *   - External mode setting from UI buttons
+ *   - Sound toggle button (top right area)
+ *   - Audio initialization on first sound enable
+ *   - Audio engine/mapper refs passed to P5Canvas
  */
 
 import { useState, useCallback } from "react";
 import { useHandTracking, type TrackingStatus } from "@/hooks/useHandTracking";
+import { useAudio } from "@/hooks/useAudio";
 import { P5Canvas } from "@/components/canvas/P5Canvas";
 import { WebcamPreview } from "@/components/camera/WebcamPreview";
 import { MODE_ORDER, MODE_LABELS } from "@/lib/particles/modes";
@@ -20,6 +20,8 @@ import type { VisualMode } from "@/lib/particles/modes";
 export default function Home() {
   const { videoRef, landmarksRef, status, error, start, stop } =
     useHandTracking();
+  const { initAudio, toggleMute, isReady: audioReady, isMuted, engineRef, mapperRef } =
+    useAudio();
 
   const [currentGesture, setCurrentGesture] = useState("none");
   const [paletteName, setPaletteName] = useState("Neon");
@@ -28,9 +30,7 @@ export default function Home() {
   const [currentMode, setCurrentMode] = useState<VisualMode>("trails");
   const [modeLabel, setModeLabel] = useState("Trails");
   const [showModeFlash, setShowModeFlash] = useState(false);
-  const [externalMode, setExternalMode] = useState<VisualMode | undefined>(
-    undefined
-  );
+  const [externalMode, setExternalMode] = useState<VisualMode | undefined>(undefined);
 
   const handleGestureChange = useCallback((gesture: string) => {
     setCurrentGesture(gesture);
@@ -60,9 +60,18 @@ export default function Home() {
     setShowModeFlash(true);
     setTimeout(() => {
       setShowModeFlash(false);
-      setExternalMode(undefined); // clear so subsequent gesture changes work
+      setExternalMode(undefined);
     }, 1200);
   }, []);
+
+  const handleSoundToggle = useCallback(async () => {
+    if (!audioReady) {
+      // First click initializes audio (satisfies browser autoplay policy).
+      await initAudio();
+    } else {
+      toggleMute();
+    }
+  }, [audioReady, initAudio, toggleMute]);
 
   return (
     <main className="relative flex-1 flex items-center justify-center overflow-hidden">
@@ -73,6 +82,8 @@ export default function Home() {
         onFreezeChange={handleFreezeChange}
         onModeChange={handleModeChange}
         externalMode={externalMode}
+        audioEngineRef={engineRef}
+        audioMapperRef={mapperRef}
       />
 
       {status === "ready" && (
@@ -126,6 +137,12 @@ export default function Home() {
             currentMode={currentMode}
             onSelect={handleModeSelect}
           />
+
+          <SoundToggle
+            isReady={audioReady}
+            isMuted={isMuted}
+            onToggle={handleSoundToggle}
+          />
         </>
       )}
     </main>
@@ -133,6 +150,31 @@ export default function Home() {
 }
 
 // ─── Sub-components ────────────────────────────────────────────────
+
+function SoundToggle({
+  isReady,
+  isMuted,
+  onToggle,
+}: {
+  isReady: boolean;
+  isMuted: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      onClick={onToggle}
+      className="absolute top-4 right-20 z-20 flex items-center gap-2 px-3 py-1.5
+                 bg-black/50 backdrop-blur-sm rounded-full text-xs cursor-pointer
+                 hover:bg-black/70 transition-colors"
+      title={!isReady ? "Enable Sound" : isMuted ? "Unmute" : "Mute"}
+    >
+      <span>{!isReady ? "🔇" : isMuted ? "🔇" : "🔊"}</span>
+      <span className="text-white/70">
+        {!isReady ? "Enable Sound" : isMuted ? "Muted" : "Sound On"}
+      </span>
+    </button>
+  );
+}
 
 function ModeSelector({
   currentMode,
@@ -168,7 +210,7 @@ function GestureIndicator({ gesture }: { gesture: string }) {
   const labels: Record<string, { icon: string; label: string }> = {
     pinch: { icon: "🤏", label: "Pinch — Color Cycle" },
     fist: { icon: "✊", label: "Fist — Freeze Toggle" },
-    spread: { icon: "🖐", label: "Spread — Mode Cycle" },
+    spread: { icon: "🖐", label: "Spread — Mode + Chord" },
     point: { icon: "☝️", label: "Point — Precision Mode" },
   };
 
@@ -193,7 +235,7 @@ function GestureHints() {
       <span>🤏 Color</span>
       <span>✊ Freeze</span>
       <span>☝️ Precision</span>
-      <span>🖐 Mode</span>
+      <span>🖐 Mode + Chord</span>
     </div>
   );
 }
@@ -205,7 +247,7 @@ function StartScreen({ onStart }: { onStart: () => void }) {
       <h1 className="text-3xl font-bold tracking-tight">Motion Canvas</h1>
       <p className="text-white/60 leading-relaxed">
         Create art with your hands. This app uses your webcam to track hand
-        movements and turn them into particle trails and visual art.
+        movements and turn them into particle trails, visual art, and music.
       </p>
       <p className="text-white/40 text-sm">
         Your camera feed stays on your device — nothing is uploaded.
